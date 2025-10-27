@@ -119,7 +119,6 @@ class SRINetTrainer:
             mode='max',
             factor=0.5,
             patience=5,
-            verbose=True,
             min_lr=1e-6
         )
         
@@ -446,7 +445,7 @@ def main():
     
     # Load processed data
     print("Loading processed data...")
-    adjacency_matrices = torch.load(f"{args.data_dir}/adjacency_matrices.pt")
+    adjacency_matrices = torch.load(f"{args.data_dir}/adjacency_matrices.pt", weights_only=False)
     
     with open(f"{args.data_dir}/user_mapping.pkl", 'rb') as f:
         user_to_idx = pickle.load(f)

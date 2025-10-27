@@ -8,8 +8,109 @@ the topology mask module with multiplex GNN processing.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+from scipy.sparse.linalg import eigsh
+from scipy import sparse as sp
+from torch_geometric.utils import get_laplacian
 from .mask_module import TopologyMaskModule
 from .gnn_layers import MaskedGCNLayer, create_gnn_layer
+
+
+def compute_spectral_positional_encodings(adjacency_matrices, pe_dim=16, use_sign_flip=True):
+    """
+    Compute spectral positional encodings from graph Laplacian eigenvectors.
+    
+    Args:
+        adjacency_matrices: Dict[category -> {edge_index, edge_weights}]
+        pe_dim: Number of eigenvectors to use per category
+        use_sign_flip: Whether to fix sign ambiguity in eigenvectors
+        
+    Returns:
+        pe_combined: [N, pe_dim * num_categories] combined positional encodings
+        pe_per_category: Dict[category -> pe] individual encodings
+    """
+    print("Computing spectral positional encodings...")
+    
+    pe_per_category = {}
+    num_nodes = None
+    
+    for category, data in adjacency_matrices.items():
+        edge_index = data['edge_index']
+        edge_weight = data.get('edge_weights', None)
+        
+        if num_nodes is None:
+            num_nodes = data['num_nodes']
+        
+        print(f"  Processing {category}...")
+        
+        try:
+            # Compute normalized Laplacian
+            edge_index_lap, edge_weight_lap = get_laplacian(
+                edge_index, edge_weight, normalization='sym', num_nodes=num_nodes
+            )
+            
+            # Convert to scipy sparse matrix for eigendecomposition
+            L = _to_scipy_sparse_matrix(edge_index_lap, edge_weight_lap, num_nodes)
+            
+            # Compute k smallest eigenvectors (excluding the trivial constant vector)
+            try:
+                # Use sparse eigendecomposition (faster for large graphs)
+                eigenvalues, eigenvectors = eigsh(L, k=pe_dim + 1, which='SM', maxiter=1000)
+                
+                # Remove the first eigenvector (constant) and eigenvalue (near 0)
+                pe = eigenvectors[:, 1:]  # [N, pe_dim]
+                eigenvalues = eigenvalues[1:]  # [pe_dim]
+                
+            except Exception as e:
+                print(f"    Warning: Sparse eigendecomposition failed ({e}), using dense")
+                # Fallback to dense eigendecomposition for small graphs
+                L_dense = L.toarray()
+                eigenvalues, eigenvectors = np.linalg.eigh(L_dense)
+                
+                # Sort by eigenvalue and take smallest (skip first constant eigenvector)
+                idx = eigenvalues.argsort()[1:pe_dim+1]
+                pe = eigenvectors[:, idx]
+                eigenvalues = eigenvalues[idx]
+            
+            # Convert to torch tensors
+            pe = torch.from_numpy(pe).float()
+            eigenvalues = torch.from_numpy(eigenvalues).float()
+            
+            # Fix sign ambiguity (make first element positive)
+            if use_sign_flip:
+                sign = torch.sign(pe[0, :])
+                sign[sign == 0] = 1
+                pe = pe * sign.unsqueeze(0)
+            
+            pe_per_category[category] = pe
+            
+            print(f"    ✓ Computed {pe_dim} eigenvectors, "
+                  f"eigenvalue range [{eigenvalues[0]:.4f}, {eigenvalues[-1]:.4f}]")
+            
+        except Exception as e:
+            print(f"    Warning: Failed to compute PE for {category}: {e}")
+            # Use random PE as fallback
+            pe_per_category[category] = torch.randn(num_nodes, pe_dim) * 0.1
+    
+    # Concatenate PEs from all categories
+    pe_list = [pe_per_category[cat] for cat in sorted(pe_per_category.keys())]
+    pe_combined = torch.cat(pe_list, dim=-1)  # [N, pe_dim * num_categories]
+    
+    print(f"✓ Combined PE shape: {pe_combined.shape}")
+    return pe_combined, pe_per_category
+
+
+def _to_scipy_sparse_matrix(edge_index, edge_weight, num_nodes):
+    """Convert PyTorch edge list to scipy sparse matrix"""
+    edge_index = edge_index.cpu().numpy()
+    edge_weight = edge_weight.cpu().numpy() if edge_weight is not None else np.ones(edge_index.shape[1])
+    
+    adj = sp.csr_matrix(
+        (edge_weight, (edge_index[0], edge_index[1])),
+        shape=(num_nodes, num_nodes)
+    )
+    
+    return adj
 
 
 class SRINet(nn.Module):
@@ -39,6 +140,27 @@ class SRINet(nn.Module):
         self.num_categories = len(self.categories)
         self.adjacency_matrices = adjacency_matrices
         self.layer_type = layer_type
+        
+        # Compute spectral positional encodings
+        pe_dim = getattr(config, 'pe_dim', 16)  # Default to 16 if not specified
+        if pe_dim > 0:
+            print(f"Computing spectral PE with pe_dim={pe_dim}...")
+            spectral_pe, pe_per_category = compute_spectral_positional_encodings(
+                adjacency_matrices, pe_dim=pe_dim
+            )
+            
+            # Register as buffer (saved with model, not trained)
+            self.register_buffer('spectral_pe', spectral_pe)
+            self.pe_dim_total = spectral_pe.shape[1]
+            
+            # Projection layer to integrate PE with learned embeddings
+            self.pe_projection = nn.Linear(self.pe_dim_total, config.embedding_dim)
+            
+            print(f"✓ Spectral PE integrated: {spectral_pe.shape} -> {config.embedding_dim}")
+        else:
+            self.spectral_pe = None
+            self.pe_projection = None
+            self.pe_dim_total = 0
         
         # Learnable node embeddings (initial features)
         self.node_embeddings = nn.Parameter(
@@ -102,8 +224,13 @@ class SRINet(nn.Module):
             edge_index = self.adjacency_matrices[category]['edge_index'].to(self.node_embeddings.device)
             edge_weights = self.adjacency_matrices[category]['edge_weights'].to(self.node_embeddings.device)
             
-            # Start with base node embeddings
+            # Start with base node embeddings enhanced with spectral PE
             h = self.node_embeddings
+            
+            # Add spectral positional encodings if available
+            if self.spectral_pe is not None:
+                pe_features = self.pe_projection(self.spectral_pe)
+                h = h + pe_features  # Residual connection
             
             # Apply layers sequentially
             for layer in range(self.config.num_layers):

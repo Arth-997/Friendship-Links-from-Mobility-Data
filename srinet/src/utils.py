@@ -32,6 +32,9 @@ class SRINetConfig:
         self.gamma = -0.1  # Lower stretch parameter
         self.eta = 1.1     # Upper stretch parameter
         
+        # Spectral positional encoding parameters
+        self.pe_dim = 16   # Number of eigenvectors per category (0 to disable)
+        
         # Training parameters
         self.learning_rate = 1e-3
         self.weight_decay = 1e-4

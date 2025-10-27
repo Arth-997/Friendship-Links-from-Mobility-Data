@@ -157,11 +157,22 @@ class TopologyMaskModule(nn.Module):
             dict: Statistics including mean, std, sparsity rate
         """
         with torch.no_grad():
-            return {
-                'mean': edge_masks.mean().item(),
-                'std': edge_masks.std().item(),
-                'min': edge_masks.min().item(),
-                'max': edge_masks.max().item(),
-                'sparsity_rate': (edge_masks < 0.1).float().mean().item(),
-                'num_edges': len(edge_masks)
-            }
+            if edge_masks.numel() == 0:
+                # Handle empty tensors
+                return {
+                    'mean': 0.0,
+                    'std': 0.0,
+                    'min': 0.0,
+                    'max': 0.0,
+                    'sparsity_rate': 1.0,
+                    'num_edges': 0
+                }
+            else:
+                return {
+                    'mean': edge_masks.mean().item(),
+                    'std': edge_masks.std().item(),
+                    'min': edge_masks.min().item(),
+                    'max': edge_masks.max().item(),
+                    'sparsity_rate': (edge_masks < 0.1).float().mean().item(),
+                    'num_edges': len(edge_masks)
+                }

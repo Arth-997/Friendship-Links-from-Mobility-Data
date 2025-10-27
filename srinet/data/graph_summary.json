@@ -1,0 +1,18 @@
+{
+  "num_categories": 9,
+  "categories": [
+    "Entertainment",
+    "Sports",
+    "Office",
+    "Education",
+    "Restaurant",
+    "Home",
+    "Shopping",
+    "Transport",
+    "Healthcare"
+  ],
+  "total_edges": 11918,
+  "time_window_hours": 2,
+  "min_meetings_per_category": 100,
+  "created_at": "2025-10-26T11:02:22.627589"
+}
